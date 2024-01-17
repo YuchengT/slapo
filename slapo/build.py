@@ -128,6 +128,8 @@ def consolidate_model(
             )
 
     def _consolidate_and_broadcast(sch: Schedule):
+        logger.info(sch.mod.parameters, ranks=[0])
+
         if isinstance(sch.mod, torch.jit.ScriptModule):
             # Scripted module requires the parameters to be initialized in advance,
             # so no need to consolidate
@@ -154,9 +156,10 @@ def consolidate_model(
             orig_shape = (
                 param.orig_shape if hasattr(param, "orig_shape") else param.shape
             )
+            logger.info(orig_shape, ranks=[0])
             new_param = nn.Parameter(
-                torch.zeros(orig_shape, dtype=param.dtype, device=local_rank)
-            )
+                    torch.zeros(orig_shape, dtype=param.dtype, device=local_rank)
+                )
             sch.mod.register_parameter(
                 param_name,
                 new_param,
@@ -193,7 +196,13 @@ def consolidate_model(
         # Only keep the partition for this device for sharded params.
         tp_rank = sch.rank
         cnt_shard = 0
-        for param_name, param in sch.mod.named_parameters(recurse=False):
+
+        ls_param_names = []
+        for param_name, _ in sch.mod.named_parameters(recurse=False):
+            ls_param_names.append(param_name)
+
+        for param_name in ls_param_names:
+            param = sch.mod._parameters.pop(param_name)
             is_found = False
             for idx, new_size in enumerate(new_param_shapes[param_name]):
                 if new_size != param.shape[idx]:
@@ -208,7 +217,9 @@ def consolidate_model(
                 new_param = nn.Parameter(sharded_param)
                 sch.mod.register_parameter(param_name, new_param)
                 transfor_param_tags(sch, param, new_param)
-
+            del param
+            torch.cuda.empty_cache()
+        
         for subsch in sch.child.values():
             ret = _consolidate_and_broadcast(subsch)
             num_params += ret[0]
@@ -267,6 +278,7 @@ def build(
             **kwargs,
         )
     else:
+        logger.info("no pipeline selected")
         model = sch.mod
 
     return init_target_engine(model, target, **kwargs)
